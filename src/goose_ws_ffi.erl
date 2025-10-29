@@ -145,11 +145,14 @@ handle_messages(ConnPid, StreamRef, HandlerPid, Compress) ->
             DictPath = filename:join(PrivDir, "zstd_dictionary"),
             case file:read_file(DictPath) of
                 {ok, DictData} ->
-                    %% Create decompression dictionary (returns reference directly)
+                    %% Create decompression context and dictionary
+                    DCtx = ezstd:create_decompression_context(1024 * 1024),
                     DDict = ezstd:create_ddict(DictData),
-                    {ok, DDict};
+                    %% Select the dictionary for the decompression context
+                    ok = ezstd:select_ddict(DCtx, DDict),
+                    {ok, {DCtx, DDict}};
                 {error, Err} ->
-                    io:format("Failed to read zstd dictionary: ~p~n", [Err]),
+                    io:format("Failed to load zstd dictionary: ~p~n", [Err]),
                     {error, Err}
             end;
         _ ->
@@ -166,16 +169,27 @@ handle_messages_loop(ConnPid, StreamRef, HandlerPid, Compress, Decompressor) ->
         {gun_ws, _AnyConnPid, _AnyStreamRef, {binary, Binary}} ->
             %% If compression is enabled, decompress the binary data
             case {Compress, Decompressor} of
-                {true, {ok, DDict}} ->
-                    try
-                        %% decompress_using_ddict returns the decompressed data directly
-                        Decompressed = ezstd:decompress_using_ddict(Binary, DDict),
-                        %% Ensure it's treated as a binary (not iolist)
-                        DecompressedBin = iolist_to_binary([Decompressed]),
-                        HandlerPid ! {ws_text, DecompressedBin}
-                    catch
-                        Error:Reason:_Stacktrace ->
-                            io:format("Decompression failed: ~p:~p~n", [Error, Reason])
+                {true, {ok, {DCtx, DDict}}} ->
+                    %% Try decompress_using_ddict first (works for frames with content size)
+                    case ezstd:decompress_using_ddict(Binary, DDict) of
+                        Result when is_binary(Result) ->
+                            HandlerPid ! {ws_text, Result};
+                        Result when is_list(Result) ->
+                            HandlerPid ! {ws_text, iolist_to_binary(Result)};
+                        {error, <<"failed to decompress: ZSTD_CONTENTSIZE_UNKNOWN">>} ->
+                            %% Frame doesn't have content size, use streaming with dictionary-loaded context
+                            case ezstd:decompress_streaming(DCtx, Binary) of
+                                StreamResult when is_binary(StreamResult) ->
+                                    HandlerPid ! {ws_text, StreamResult};
+                                StreamResult when is_list(StreamResult) ->
+                                    HandlerPid ! {ws_text, iolist_to_binary(StreamResult)};
+                                {error, _StreamReason} ->
+                                    %% Skip frames that fail to decompress
+                                    ok
+                            end;
+                        {error, _Reason} ->
+                            %% Skip frames that fail to decompress
+                            ok
                     end;
                 _ ->
                     %% No compression, ignore binary messages
