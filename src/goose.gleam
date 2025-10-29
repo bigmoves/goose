@@ -95,7 +95,10 @@ pub fn build_url(config: JetstreamConfig) -> String {
   let mut_params = case config.max_message_size_bytes {
     option.None -> mut_params
     option.Some(size_val) ->
-      list.append(["maxMessageSizeBytes=" <> string.inspect(size_val)], mut_params)
+      list.append(
+        ["maxMessageSizeBytes=" <> string.inspect(size_val)],
+        mut_params,
+      )
   }
 
   // Add compress parameter (always include it)
