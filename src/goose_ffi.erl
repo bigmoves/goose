@@ -11,13 +11,13 @@ receive_ws_message() ->
             %% Ignore binary messages, try again
             receive_ws_message();
         {ws_closed, _Reason} ->
-            {error, nil};
+            {error, closed};
         {ws_error, _Reason} ->
-            {error, nil};
+            {error, connection_error};
         _Other ->
             %% Ignore unexpected messages
             receive_ws_message()
     after 60000 ->
-        %% Timeout - return error to continue loop
-        {error, nil}
+        %% Timeout - connection is still alive, just no messages
+        {error, timeout}
     end.

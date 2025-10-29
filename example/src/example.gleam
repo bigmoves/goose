@@ -13,13 +13,16 @@ pub fn main() -> Nil {
       max_message_size_bytes: option.None,
       compress: True,
       require_hello: False,
+      max_backoff_seconds: 60,
+      log_connection_events: True,
+      log_retry_attempts: True,
     )
 
   io.println("Starting Jetstream consumer...")
   io.println("Connected to: " <> config.endpoint)
   io.println("Listening for all events...\n")
 
-  // Start consuming and log all events
+  // Start consuming and log all events (automatically retries on failure)
   goose.start_consumer(config, fn(json_event) {
     let event = goose.parse_event(json_event)
 

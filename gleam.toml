@@ -1,5 +1,5 @@
 name = "goose"
-version = "1.0.0"
+version = "1.1.0"
 description = "A Gleam WebSocket consumer for AT Protocol Jetstream events"
 licences = ["Apache-2.0"]
 repository = { type = "github", user = "bigmoves", repo = "goose" }

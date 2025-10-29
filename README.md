@@ -9,29 +9,16 @@ A Gleam WebSocket consumer for AT Protocol Jetstream events.
 gleam add goose@1
 ```
 
-## Example
+## Quick Start
 
 ```gleam
 import goose
 import gleam/io
-import gleam/option
 
 pub fn main() {
-  // Create a default configuration
+  // Use default config with automatic retry logic
   let config = goose.default_config()
 
-  // Or configure with custom options
-  let config = goose.JetstreamConfig(
-    endpoint: "wss://jetstream2.us-east.bsky.network/subscribe",
-    wanted_collections: ["app.bsky.feed.post", "app.bsky.feed.like"],
-    wanted_dids: [],
-    cursor: option.None,
-    max_message_size_bytes: option.None,
-    compress: False,
-    require_hello: False,
-  )
-
-  // Start consuming events
   goose.start_consumer(config, fn(json_event) {
     let event = goose.parse_event(json_event)
 
@@ -53,7 +40,34 @@ pub fn main() {
 }
 ```
 
+### Custom Configuration
+
+```gleam
+import goose
+import gleam/option
+
+pub fn main() {
+  let config = goose.JetstreamConfig(
+    endpoint: "wss://jetstream2.us-east.bsky.network/subscribe",
+    wanted_collections: ["app.bsky.feed.post", "app.bsky.feed.like"],
+    wanted_dids: [],
+    cursor: option.None,
+    max_message_size_bytes: option.None,
+    compress: False,
+    require_hello: False,
+    // Retry configuration
+    max_backoff_seconds: 60,      // Max wait between retries
+    log_connection_events: True,  // Log connects/disconnects
+    log_retry_attempts: False,    // Skip verbose retry logs
+  )
+
+  goose.start_consumer(config, handle_event)
+}
+```
+
 ## Configuration Options
+
+**Note:** Goose automatically handles connection failures with exponential backoff retry logic (1s, 2s, 4s, 8s, 16s, 32s, up to max). All connections automatically retry on failure, reconnect on disconnection, and distinguish between harmless timeouts and real errors.
 
 ### `wanted_collections`
 An array of Collection NSIDs to filter which records you receive (default: empty = all collections)
@@ -131,6 +145,41 @@ Pause replay/live-tail until server receives a `SubscriberOptionsUpdatePayload`
 require_hello: True
 ```
 
+### `max_backoff_seconds`
+Maximum wait time in seconds between retry attempts
+
+- Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, then capped at this value
+- Default: `60`
+
+**Example:**
+```gleam
+max_backoff_seconds: 120  // Allow up to 2 minute waits between retries
+```
+
+### `log_connection_events`
+Whether to log connection state changes (connected, disconnected)
+
+- Set to `True` to log important connection events
+- Default: `True`
+- Recommended: `True` for production (know when disconnects happen)
+
+**Example:**
+```gleam
+log_connection_events: True
+```
+
+### `log_retry_attempts`
+Whether to log detailed retry attempt information
+
+- Set to `True` to log attempt numbers, errors, and backoff times
+- Default: `True`
+- Recommended: `False` for production (reduces log noise)
+
+**Example:**
+```gleam
+log_retry_attempts: False  // Production: skip verbose retry logs
+```
+
 ## Full Configuration Example
 
 ```gleam
@@ -145,6 +194,9 @@ let config = goose.JetstreamConfig(
   max_message_size_bytes: option.Some(2097152),  // 2MB
   compress: True,
   require_hello: False,
+  max_backoff_seconds: 60,
+  log_connection_events: True,
+  log_retry_attempts: False,
 )
 
 goose.start_consumer(config, handle_event)

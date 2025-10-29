@@ -1,6 +1,8 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
+import gleam/erlang/atom
 import gleam/erlang/process.{type Pid}
+import gleam/int
 import gleam/io
 import gleam/json
 import gleam/list
@@ -44,10 +46,17 @@ pub type JetstreamConfig {
     max_message_size_bytes: Option(Int),
     compress: Bool,
     require_hello: Bool,
+    /// Maximum backoff time in seconds for retry logic (default: 60)
+    max_backoff_seconds: Int,
+    /// Whether to log connection events (connected, disconnected) (default: True)
+    log_connection_events: Bool,
+    /// Whether to log retry attempts and errors (default: True)
+    log_retry_attempts: Bool,
   )
 }
 
 /// Create a default configuration for US East endpoint
+/// Includes automatic retry with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, capped at 60s)
 pub fn default_config() -> JetstreamConfig {
   JetstreamConfig(
     endpoint: "wss://jetstream2.us-east.bsky.network/subscribe",
@@ -57,6 +66,9 @@ pub fn default_config() -> JetstreamConfig {
     max_message_size_bytes: option.None,
     compress: False,
     require_hello: False,
+    max_backoff_seconds: 60,
+    log_connection_events: True,
+    log_retry_attempts: True,
   )
 }
 
@@ -127,10 +139,35 @@ pub fn connect(
   compress: Bool,
 ) -> Result(Pid, Dynamic)
 
-/// Start consuming the Jetstream feed
+/// Start consuming the Jetstream feed with automatic retry logic
+///
+/// Handles connection failures gracefully with exponential backoff and automatic reconnection.
+/// The retry behavior is configured through the JetstreamConfig fields:
+/// - max_backoff_seconds: Maximum wait time between retries
+/// - log_connection_events: Log connects/disconnects
+/// - log_retry_attempts: Log retry attempts and errors
+///
+/// Example:
+/// ```gleam
+/// let config = goose.default_config()
+///
+/// goose.start_consumer(config, fn(event_json) {
+///   // Handle event
+///   io.println(event_json)
+/// })
+/// ```
 pub fn start_consumer(
   config: JetstreamConfig,
   on_event: fn(String) -> Nil,
+) -> Nil {
+  start_with_retry_internal(config, on_event, 0)
+}
+
+/// Internal function to handle connection with retry
+fn start_with_retry_internal(
+  config: JetstreamConfig,
+  on_event: fn(String) -> Nil,
+  retry_count: Int,
 ) -> Nil {
   let url = build_url(config)
   let self = process.self()
@@ -138,33 +175,115 @@ pub fn start_consumer(
 
   case result {
     Ok(_conn_pid) -> {
-      receive_loop(on_event)
+      case config.log_connection_events {
+        True -> io.println("Connected to Jetstream successfully")
+        False -> Nil
+      }
+      // Start receiving with retry support
+      receive_with_retry(config, on_event)
     }
     Error(err) -> {
-      io.println("Failed to connect to Jetstream")
-      io.println_error(string.inspect(err))
+      // Connection failed, calculate backoff and retry
+      let backoff_seconds = calculate_backoff(retry_count, config)
+      case config.log_retry_attempts {
+        True -> {
+          io.println(
+            "Failed to connect to Jetstream (attempt "
+            <> int.to_string(retry_count + 1)
+            <> "): "
+            <> string.inspect(err),
+          )
+          io.println(
+            "Retrying in " <> int.to_string(backoff_seconds) <> " seconds...",
+          )
+        }
+        False -> Nil
+      }
+
+      // Sleep for backoff period
+      process.sleep(backoff_seconds * 1000)
+
+      // Retry connection
+      start_with_retry_internal(config, on_event, retry_count + 1)
     }
   }
 }
 
-/// Receive loop for WebSocket messages
-fn receive_loop(on_event: fn(String) -> Nil) -> Nil {
-  // Call Erlang to receive one message
+/// Calculate exponential backoff with configurable maximum
+fn calculate_backoff(retry_count: Int, config: JetstreamConfig) -> Int {
+  let backoff = case retry_count {
+    0 -> 1
+    1 -> 2
+    2 -> 4
+    3 -> 8
+    4 -> 16
+    5 -> 32
+    _ -> config.max_backoff_seconds
+  }
+
+  // Cap at max_backoff_seconds
+  case backoff > config.max_backoff_seconds {
+    True -> config.max_backoff_seconds
+    False -> backoff
+  }
+}
+
+/// Receive messages with retry logic
+fn receive_with_retry(
+  config: JetstreamConfig,
+  on_event: fn(String) -> Nil,
+) -> Nil {
   case receive_ws_message() {
     Ok(text) -> {
       on_event(text)
-      receive_loop(on_event)
+      receive_with_retry(config, on_event)
     }
-    Error(_) -> {
-      // Timeout or error, continue loop
-      receive_loop(on_event)
+    Error(error_dynamic) -> {
+      // Decode error type
+      let atm = atom.cast_from_dynamic(error_dynamic)
+      let error_type = atom.to_string(atm)
+
+      case error_type {
+        "timeout" -> {
+          // No messages in 60s, connection is alive - continue
+          receive_with_retry(config, on_event)
+        }
+        "closed" -> {
+          // Connection closed - log if configured
+          case config.log_connection_events {
+            True -> io.println("Jetstream connection closed, reconnecting...")
+            False -> Nil
+          }
+          start_with_retry_internal(config, on_event, 0)
+        }
+        "connection_error" -> {
+          // Connection error - log if configured
+          case config.log_connection_events {
+            True -> io.println("Jetstream connection error, reconnecting...")
+            False -> Nil
+          }
+          start_with_retry_internal(config, on_event, 0)
+        }
+        _ -> {
+          // Unknown error - log if retry logging is enabled
+          case config.log_retry_attempts {
+            True -> {
+              io.println("Unknown Jetstream error: " <> error_type)
+              io.println("Reconnecting...")
+            }
+            False -> Nil
+          }
+          start_with_retry_internal(config, on_event, 0)
+        }
+      }
     }
   }
 }
 
 /// Receive a WebSocket message from the message queue
+/// Returns Ok(text) for messages, or Error with one of: timeout, closed, connection_error
 @external(erlang, "goose_ffi", "receive_ws_message")
-fn receive_ws_message() -> Result(String, Nil)
+fn receive_ws_message() -> Result(String, Dynamic)
 
 /// Parse a JSON event string into a JetstreamEvent
 pub fn parse_event(json_string: String) -> JetstreamEvent {
