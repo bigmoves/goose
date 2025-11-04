@@ -63,10 +63,7 @@ type ConnectionState {
 
 /// Decompression context holder
 type Decompressor {
-  Decompressor(
-    dctx: zstd.DecompressionContext,
-    ddict: zstd.DecompressionDict,
-  )
+  Decompressor(dctx: zstd.DecompressionContext, ddict: zstd.DecompressionDict)
 }
 
 /// Create a default configuration for US East endpoint
@@ -261,10 +258,9 @@ fn start_with_retry_internal(
 
   // Start WebSocket connection
   let result =
-    stratus.new_with_initialiser(
-      request: req,
-      init: fn() { Ok(stratus.initialised(state)) },
-    )
+    stratus.new_with_initialiser(request: req, init: fn() {
+      Ok(stratus.initialised(state))
+    })
     |> stratus.on_message(handle_message)
     |> stratus.on_close(handle_close)
     |> stratus.with_connect_timeout(30_000)

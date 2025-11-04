@@ -15,6 +15,12 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 import gleam/uri
+import goose/stratus/internal/socket.{
+  type Socket, type SocketMessage, Cacerts, Once, Pull, Receive,
+}
+import goose/stratus/internal/ssl
+import goose/stratus/internal/tcp
+import goose/stratus/internal/transport.{type Transport, Ssl, Tcp}
 import gramps/http as gramps_http
 import gramps/websocket.{
   BinaryFrame, CloseFrame, Continuation, Control, Data as DataFrame, PingFrame,
@@ -22,12 +28,6 @@ import gramps/websocket.{
 }
 import gramps/websocket/compression
 import logging
-import goose/stratus/internal/socket.{
-  type Socket, type SocketMessage, Cacerts, Once, Pull, Receive,
-}
-import goose/stratus/internal/ssl
-import goose/stratus/internal/tcp
-import goose/stratus/internal/transport.{type Transport, Ssl, Tcp}
 
 /// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
