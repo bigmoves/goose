@@ -13,9 +13,6 @@ pub fn main() -> Nil {
       max_message_size_bytes: option.None,
       compress: True,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
 
   io.println("Starting Jetstream consumer...")

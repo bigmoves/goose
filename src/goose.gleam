@@ -1,13 +1,16 @@
+import gleam/bit_array
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
-import gleam/erlang/atom
-import gleam/erlang/process.{type Pid}
-import gleam/int
-import gleam/io
+import gleam/erlang/process
+import gleam/http/request
 import gleam/json
 import gleam/list
 import gleam/option.{type Option}
+import gleam/result
 import gleam/string
+import goose/internal/zstd
+import goose/stratus
+import simplifile
 
 /// Jetstream event types
 pub type JetstreamEvent {
@@ -46,12 +49,23 @@ pub type JetstreamConfig {
     max_message_size_bytes: Option(Int),
     compress: Bool,
     require_hello: Bool,
-    /// Maximum backoff time in seconds for retry logic (default: 60)
-    max_backoff_seconds: Int,
-    /// Whether to log connection events (connected, disconnected) (default: True)
-    log_connection_events: Bool,
-    /// Whether to log retry attempts and errors (default: True)
-    log_retry_attempts: Bool,
+  )
+}
+
+/// Internal state for WebSocket connection
+type ConnectionState {
+  ConnectionState(
+    config: JetstreamConfig,
+    on_event: fn(String) -> Nil,
+    decompressor: Option(Decompressor),
+  )
+}
+
+/// Decompression context holder
+type Decompressor {
+  Decompressor(
+    dctx: zstd.DecompressionContext,
+    ddict: zstd.DecompressionDict,
   )
 }
 
@@ -66,9 +80,6 @@ pub fn default_config() -> JetstreamConfig {
     max_message_size_bytes: option.None,
     compress: False,
     require_hello: False,
-    max_backoff_seconds: 60,
-    log_connection_events: True,
-    log_retry_attempts: True,
   )
 }
 
@@ -131,13 +142,63 @@ pub fn build_url(config: JetstreamConfig) -> String {
   }
 }
 
-/// Connect to Jetstream WebSocket using Erlang gun library
-@external(erlang, "goose_ws_ffi", "connect")
-pub fn connect(
-  url: String,
-  handler_pid: Pid,
-  compress: Bool,
-) -> Result(Pid, Dynamic)
+/// Load the zstd decompression dictionary
+fn load_decompressor() -> Result(Decompressor, String) {
+  // Get priv directory
+  let priv_dir = get_priv_dir()
+  let dict_path = priv_dir <> "/zstd_dictionary"
+
+  // Read dictionary file
+  use dict_data <- result.try(
+    simplifile.read_bits(dict_path)
+    |> result.map_error(fn(_) {
+      "Failed to load zstd dictionary from " <> dict_path
+    }),
+  )
+
+  // Create decompression context and dictionary
+  let dctx = zstd.create_decompression_context(1024 * 1024)
+  let ddict = zstd.create_ddict(dict_data)
+
+  // Select dictionary for context
+  use _ <- result.try(zstd.select_ddict(dctx, ddict))
+
+  Ok(Decompressor(dctx: dctx, ddict: ddict))
+}
+
+/// Get the priv directory path for this application
+@external(erlang, "goose_ffi", "priv_dir")
+fn get_priv_dir() -> String
+
+/// Decompress zstd-compressed data
+fn decompress_data(
+  data: BitArray,
+  decompressor: Decompressor,
+) -> Result(String, String) {
+  // Try decompress_using_ddict first (works for frames with content size)
+  case zstd.decompress_using_ddict(data, decompressor.ddict) {
+    Ok(decompressed) ->
+      bit_array.to_string(decompressed)
+      |> result.replace_error("Failed to decode decompressed data as UTF-8")
+    Error(msg) -> {
+      // Check if error is due to unknown content size
+      case string.contains(msg, "ZSTD_CONTENTSIZE_UNKNOWN") {
+        True -> {
+          // Frame doesn't have content size, use streaming with dictionary-loaded context
+          case zstd.decompress_streaming(decompressor.dctx, data) {
+            Ok(decompressed) ->
+              bit_array.to_string(decompressed)
+              |> result.replace_error(
+                "Failed to decode streaming decompressed data as UTF-8",
+              )
+            Error(_stream_err) -> Error("Streaming decompression failed")
+          }
+        }
+        False -> Error("Decompression failed")
+      }
+    }
+  }
+}
 
 /// Start consuming the Jetstream feed with automatic retry logic
 ///
@@ -170,35 +231,53 @@ fn start_with_retry_internal(
   retry_count: Int,
 ) -> Nil {
   let url = build_url(config)
-  let self = process.self()
-  let result = connect(url, self, config.compress)
+
+  // Convert wss:// to https:// and ws:// to http:// for request parsing
+  let http_url =
+    url
+    |> string.replace("wss://", "https://")
+    |> string.replace("ws://", "http://")
+
+  // Parse URL into HTTP request
+  let assert Ok(req) = request.to(http_url)
+
+  // Load decompressor if compression is enabled
+  let decompressor = case config.compress {
+    True ->
+      case load_decompressor() {
+        Ok(dec) -> option.Some(dec)
+        Error(_err) -> option.None
+      }
+    False -> option.None
+  }
+
+  // Create initial state
+  let state =
+    ConnectionState(
+      config: config,
+      on_event: on_event,
+      decompressor: decompressor,
+    )
+
+  // Start WebSocket connection
+  let result =
+    stratus.new_with_initialiser(
+      request: req,
+      init: fn() { Ok(stratus.initialised(state)) },
+    )
+    |> stratus.on_message(handle_message)
+    |> stratus.on_close(handle_close)
+    |> stratus.with_connect_timeout(30_000)
+    |> stratus.start()
 
   case result {
-    Ok(_conn_pid) -> {
-      case config.log_connection_events {
-        True -> io.println("Connected to Jetstream successfully")
-        False -> Nil
-      }
-      // Start receiving with retry support
-      receive_with_retry(config, on_event)
+    Ok(_websocket) -> {
+      // Keep process alive indefinitely
+      process.sleep_forever()
     }
-    Error(err) -> {
+    Error(_err) -> {
       // Connection failed, calculate backoff and retry
-      let backoff_seconds = calculate_backoff(retry_count, config)
-      case config.log_retry_attempts {
-        True -> {
-          io.println(
-            "Failed to connect to Jetstream (attempt "
-            <> int.to_string(retry_count + 1)
-            <> "): "
-            <> string.inspect(err),
-          )
-          io.println(
-            "Retrying in " <> int.to_string(backoff_seconds) <> " seconds...",
-          )
-        }
-        False -> Nil
-      }
+      let backoff_seconds = calculate_backoff(retry_count)
 
       // Sleep for backoff period
       process.sleep(backoff_seconds * 1000)
@@ -209,81 +288,63 @@ fn start_with_retry_internal(
   }
 }
 
-/// Calculate exponential backoff with configurable maximum
-fn calculate_backoff(retry_count: Int, config: JetstreamConfig) -> Int {
-  let backoff = case retry_count {
+/// Handle incoming WebSocket messages
+fn handle_message(
+  state: ConnectionState,
+  msg: stratus.Message(Nil),
+  _conn: stratus.Connection,
+) -> stratus.Next(ConnectionState, Nil) {
+  case msg {
+    stratus.Text(text) -> {
+      state.on_event(text)
+      stratus.continue(state)
+    }
+    stratus.Binary(data) -> {
+      // Handle compressed binary data if decompressor is available
+      case state.decompressor {
+        option.Some(decompressor) -> {
+          case decompress_data(data, decompressor) {
+            Ok(text) -> {
+              state.on_event(text)
+              stratus.continue(state)
+            }
+            Error(_err) -> {
+              // Skip frames that fail to decompress
+              stratus.continue(state)
+            }
+          }
+        }
+        option.None -> {
+          // No decompressor, ignore binary messages
+          stratus.continue(state)
+        }
+      }
+    }
+    stratus.User(_) -> {
+      // No custom user messages in this implementation
+      stratus.continue(state)
+    }
+  }
+}
+
+/// Handle WebSocket connection close
+fn handle_close(state: ConnectionState) -> Nil {
+  // Reconnect from the beginning
+  start_with_retry_internal(state.config, state.on_event, 0)
+}
+
+/// Calculate exponential backoff capped at 60 seconds
+fn calculate_backoff(retry_count: Int) -> Int {
+  case retry_count {
     0 -> 1
     1 -> 2
     2 -> 4
     3 -> 8
     4 -> 16
     5 -> 32
-    _ -> config.max_backoff_seconds
-  }
-
-  // Cap at max_backoff_seconds
-  case backoff > config.max_backoff_seconds {
-    True -> config.max_backoff_seconds
-    False -> backoff
+    _ -> 60
   }
 }
-
-/// Receive messages with retry logic
-fn receive_with_retry(
-  config: JetstreamConfig,
-  on_event: fn(String) -> Nil,
-) -> Nil {
-  case receive_ws_message() {
-    Ok(text) -> {
-      on_event(text)
-      receive_with_retry(config, on_event)
-    }
-    Error(error_dynamic) -> {
-      // Decode error type
-      let atm = atom.cast_from_dynamic(error_dynamic)
-      let error_type = atom.to_string(atm)
-
-      case error_type {
-        "timeout" -> {
-          // No messages in 60s, connection is alive - continue
-          receive_with_retry(config, on_event)
-        }
-        "closed" -> {
-          // Connection closed - log if configured
-          case config.log_connection_events {
-            True -> io.println("Jetstream connection closed, reconnecting...")
-            False -> Nil
-          }
-          start_with_retry_internal(config, on_event, 0)
-        }
-        "connection_error" -> {
-          // Connection error - log if configured
-          case config.log_connection_events {
-            True -> io.println("Jetstream connection error, reconnecting...")
-            False -> Nil
-          }
-          start_with_retry_internal(config, on_event, 0)
-        }
-        _ -> {
-          // Unknown error - log if retry logging is enabled
-          case config.log_retry_attempts {
-            True -> {
-              io.println("Unknown Jetstream error: " <> error_type)
-              io.println("Reconnecting...")
-            }
-            False -> Nil
-          }
-          start_with_retry_internal(config, on_event, 0)
-        }
-      }
-    }
-  }
-}
-
-/// Receive a WebSocket message from the message queue
-/// Returns Ok(text) for messages, or Error with one of: timeout, closed, connection_error
-@external(erlang, "goose_ffi", "receive_ws_message")
-fn receive_ws_message() -> Result(String, Dynamic)
 
 /// Parse a JSON event string into a JetstreamEvent
 pub fn parse_event(json_string: String) -> JetstreamEvent {

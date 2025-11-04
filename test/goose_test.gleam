@@ -26,9 +26,6 @@ pub fn build_url_with_collections_test() {
       max_message_size_bytes: option.None,
       compress: False,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -47,9 +44,6 @@ pub fn build_url_with_dids_test() {
       max_message_size_bytes: option.None,
       compress: False,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -68,9 +62,6 @@ pub fn build_url_with_both_test() {
       max_message_size_bytes: option.None,
       compress: False,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -89,9 +80,6 @@ pub fn build_url_with_cursor_test() {
       max_message_size_bytes: option.None,
       compress: False,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -110,9 +98,6 @@ pub fn build_url_with_max_size_test() {
       max_message_size_bytes: option.Some(1_048_576),
       compress: False,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -131,9 +116,6 @@ pub fn build_url_with_compress_test() {
       max_message_size_bytes: option.None,
       compress: True,
       require_hello: False,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -152,9 +134,6 @@ pub fn build_url_with_require_hello_test() {
       max_message_size_bytes: option.None,
       compress: False,
       require_hello: True,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 
@@ -173,9 +152,6 @@ pub fn build_url_with_all_options_test() {
       max_message_size_bytes: option.Some(2_097_152),
       compress: True,
       require_hello: True,
-      max_backoff_seconds: 60,
-      log_connection_events: True,
-      log_retry_attempts: True,
     )
   let url = goose.build_url(config)
 

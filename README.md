@@ -53,12 +53,8 @@ pub fn main() {
     wanted_dids: [],
     cursor: option.None,
     max_message_size_bytes: option.None,
-    compress: False,
+    compress: True,
     require_hello: False,
-    // Retry configuration
-    max_backoff_seconds: 60,      // Max wait between retries
-    log_connection_events: True,  // Log connects/disconnects
-    log_retry_attempts: False,    // Skip verbose retry logs
   )
 
   goose.start_consumer(config, handle_event)
@@ -67,7 +63,7 @@ pub fn main() {
 
 ## Configuration Options
 
-**Note:** Goose automatically handles connection failures with exponential backoff retry logic (1s, 2s, 4s, 8s, 16s, 32s, up to max). All connections automatically retry on failure, reconnect on disconnection, and distinguish between harmless timeouts and real errors.
+**Note:** Goose automatically handles connection failures with exponential backoff retry logic (1s, 2s, 4s, 8s, 16s, 32s, capped at 60s). All connections automatically retry on failure and reconnect on disconnection.
 
 ### `wanted_collections`
 An array of Collection NSIDs to filter which records you receive (default: empty = all collections)
@@ -145,41 +141,6 @@ Pause replay/live-tail until server receives a `SubscriberOptionsUpdatePayload`
 require_hello: True
 ```
 
-### `max_backoff_seconds`
-Maximum wait time in seconds between retry attempts
-
-- Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, then capped at this value
-- Default: `60`
-
-**Example:**
-```gleam
-max_backoff_seconds: 120  // Allow up to 2 minute waits between retries
-```
-
-### `log_connection_events`
-Whether to log connection state changes (connected, disconnected)
-
-- Set to `True` to log important connection events
-- Default: `True`
-- Recommended: `True` for production (know when disconnects happen)
-
-**Example:**
-```gleam
-log_connection_events: True
-```
-
-### `log_retry_attempts`
-Whether to log detailed retry attempt information
-
-- Set to `True` to log attempt numbers, errors, and backoff times
-- Default: `True`
-- Recommended: `False` for production (reduces log noise)
-
-**Example:**
-```gleam
-log_retry_attempts: False  // Production: skip verbose retry logs
-```
-
 ## Full Configuration Example
 
 ```gleam
@@ -194,9 +155,6 @@ let config = goose.JetstreamConfig(
   max_message_size_bytes: option.Some(2097152),  // 2MB
   compress: True,
   require_hello: False,
-  max_backoff_seconds: 60,
-  log_connection_events: True,
-  log_retry_attempts: False,
 )
 
 goose.start_consumer(config, handle_event)
