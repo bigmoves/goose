@@ -6,7 +6,7 @@
 A Gleam WebSocket consumer for AT Protocol Jetstream events.
 
 ```sh
-gleam add goose@1
+gleam add goose
 ```
 
 ## Quick Start
